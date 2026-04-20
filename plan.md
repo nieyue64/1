@@ -1,53 +1,53 @@
-# 猴子补丁 (Monkey Patch) 治理与重构计划
+# 重构执行计划：基于分级治理架构的猴子补丁优化 (v2.0 终极版)
 
-## 1. 现状分析
-当前代码库是一个超大型的单文件 Web 游戏项目（超过 1.5MB）。游戏的功能迭代和修复大量依赖于 `TU.PatchRegistry` 补丁管理系统，通过猴子补丁机制（覆写原型方法，如 `ClassName.prototype.method = ...`）来劫持底层类（`Game`、`Renderer`、`AudioManager`、`WorldGenerator` 等）。
-
-**主要存在的补丁包括：**
-- **体验与渲染优化**：移动端摇杆防误触、触摸优化、渲染缓存清理（`experience_optimized_v2`）。
-- **存档与性能**：localStorage 超限降级到 IndexedDB、掉落物批处理渲染（`batching_idb_pickup_safe_v2`）。
-- **天气系统拆分**：天气音效同步、雨滴独立 Canvas 渲染优化（`weather_lighting_audio_sync_v1` 等）。
-- **大型内容扩展 (DLC级别)**：多生物群系、地下矿井、动态水泵、云层等硬编码注入（`v9_biomes_mines_dynamic_water_pumps_clouds_reverb`）。
-- **机制与特效**：酸雨环境灾害及 UI 闪烁（`tu_acid_rain_hazard_v1`）。
-- **多线程改造**：通过序列化函数注入 Web Worker 进行离屏渲染和世界生成（`tu_world_worker_patch_v1`）。
-
-## 2. 核心痛点（导致代码“乱七八糟”的原因）
-1. **隐式依赖与执行顺序黑盒**：补丁生效高度依赖加载顺序，某个环节失败会导致后续补丁链式崩溃。
-2. **脆弱的原型链污染**：经过多次补丁拦截，调用栈极深且难以调试。代码中充斥着防止重复安装的全局“补丁锁”（如 `__chunkBatchSafeInstalled`），导致类状态异常臃肿。
-3. **高危的字符串化注入**：Web Worker 补丁大量使用 `fn.toString()` 将主线程方法转为字符串执行，完全丢失闭包作用域，且**极度不兼容代码压缩与混淆**。
-4. **逻辑严重碎片化**：例如“天气”功能被强行割裂在 4 个独立的补丁中，开发者无法集中维护同一套逻辑，维护成本极高。
-5. **异常疯狂吞噬**：为了防止原型链篡改导致游戏白屏，大量补丁逻辑被无差别的 `try-catch` 包裹，掩盖了深层次的逻辑冲突。
-
-## 3. 重构策略与执行步骤（渐进式）
-
-要从根本上治理，必须将代码从**“运行时动态拦截”**重构为**“编译期静态组织”**和**“事件驱动架构”**。
-
-### 阶段一：构建工具引入与物理拆分（模块化）
-- **目标**：终结单文件开发模式，引入现代前端工程化。
-- **操作**：
-  1. 引入 Vite / Webpack 构建工具。
-  2. 将庞大的单文件 HTML 物理拆分为多个独立的 ES Modules (`.js` 或 `.ts`)，如提取 `Game.js`, `Renderer.js`, `WorldGenerator.js`。
-  3. 将 Web Worker 代码抽离为独立的 `worker.js` 文件，彻底废弃危险的 `fn.toString()` 注入方案，改用标准的 `postMessage` 通信。
-
-### 阶段二：建立事件总线与生命周期机制（解耦）
-- **目标**：消除对核心系统（如 `update`, `render`）的粗暴覆写。
-- **操作**：
-  1. 引入全局的 `EventBus`（事件总线）。
-  2. 在核心循环中埋入标准生命周期钩子，例如 `emit('beforeRender')`, `emit('onWeatherUpdate')`。
-  3. 挑选边缘补丁（如酸雨灾害、低性能模式），将其由“原型劫持”重构为“事件监听”模式。
-
-### 阶段三：重构核心系统为插件/注册表模式（规范化）
-- **目标**：为内容扩展提供标准 API，避免修改全局字典。
-- **操作**：
-  1. **数据注册表**：设计 `BlockRegistry` 和 `BiomeRegistry`，新内容模块在初始化阶段通过标准 API（如 `registerBlock`）合法注册，取代硬编码。
-  2. **渲染管线**：将渲染器中被注入的后处理特效（酸雨、光影）重构为标准的 `PostProcessEffect`，作为管线的一环按顺序遍历绘制。
-  3. **插件管理器**：将高危的 `TU.PatchRegistry` 改造为合法的 `TU.PluginManager`，把“补丁”正规化为依赖清晰的“游戏插件”。
-
-### 阶段四：清理与测试
-- **目标**：彻底移除旧体系，确保稳定性。
-- **操作**：
-  1. 移除所有多余的全局“补丁锁”和被吞噬的 `try-catch` 代码块。
-  2. 进行全面的功能回归测试，重点关注存档降级、Web Worker 生成、多生物群系等核心模块的稳定性。
+经过对 `/workspace/part3_game_single (6) (9)(9)(2)(6).html` 源码长达数十次的并行深度分析与引擎时序验证，我们摒弃了“简单粗暴合并”的危险做法，制定了以下科学、安全的**分级治理规范（Tiered Governance Spec）**。
 
 ---
-*注：重构将采取渐进式策略，确保在每个阶段游戏都能正常运行，避免“推翻重写”带来的高风险。*
+
+## 核心重构策略：分级治理 (Tiered Governance)
+
+### 级别 1：完全原生化 (Native Integration)
+**适用对象**：逻辑扁平、无嵌套、直接依赖闭包常量的补丁。
+- **涉及类**：`InputManager`, `AudioManager`, `TextureGenerator`, `DroppedItemManager`, `TouchController`
+- **操作规范**：
+  - 将补丁中的新增方法（如 `_startRainSynth`, `beep`, `noise`）直接写入 ES6 `class` 内部。
+  - 将针对原有方法的劫持（如 `_drawPixelArt`, `spawn`），直接合并到类内部的方法中。
+  - **彻底移除**防重复执行标志（如 `__logicPatched = !0`、`__tuAudioVisPatch`）。
+  - **彻底移除** `_oldXxx.call(this)` 的闭包开销，将代码扁平化为纯粹的面向对象调用。
+
+### 级别 2：洋葱模型解构 (Onion Model Deconstruction)
+**适用对象**：被多个独立补丁层层嵌套修改的核心高频方法（洋葱模式）。
+- **涉及类与方法**：
+  - `Renderer.prototype.applyPostFX` (被天气、水下雾气等修改了 4 次)
+  - `Game.prototype.init` / `Game.prototype._startRaf`
+  - `Game.prototype._writeTileFast` (被双重包装)
+- **操作规范**：
+  - **拒绝简单合并**。人工梳理这 3~4 层拦截逻辑，按其原本的执行顺序（Order），将它们**展平（Unroll）并融合为一个单一的、线性的完整方法**，然后替换原有的类方法。
+  - 消除多层函数调用的性能损耗（Call Stack Overhead）。
+
+### 级别 3：规范化插件架构 (Standardized Plugin Architecture)
+**适用对象**：长达数百行、引入了全新子系统（如降级存储、多线程）的巨型补丁。
+- **涉及系统**：
+  - `SaveSystem` 的 IndexedDB 降级存储系统 (长达 600 行)
+  - `WorldWorkerClient` 的离屏逻辑同步系统
+  - 自动化机器（Machines）的全局索引系统
+- **操作规范**：
+  - **禁止合并入核心类**（防止类体积失控）。
+  - 将这些独立逻辑提取为真正的**独立模块/类**（例如命名为 `IDBSavePlugin`, `WorkerSyncPlugin`）。
+  - 依然利用现有的 `TU.PatchRegistry` 或 `GameEvents` 系统，在 `game:init:post` 或 `game:ready` 生命周期钩子中，以标准的“插件注入”方式挂载，保留代码的极度解耦优势。
+
+---
+
+## 执行步骤 (Action Plan)
+
+1. **阶段一：安全备份与级别 1 重构**
+   - 提取 `InputManager`, `AudioManager` 等类，进行级别 1 原生化合并，清除防御性变量，验证闭包作用域（`IDS.WIRE_ON` 等）。
+2. **阶段二：级别 2 核心渲染管线展平**
+   - 重点重写 `applyPostFX` 和 `_writeTileFast`，按物理逻辑顺序融合多重环境滤镜和状态分发器。
+3. **阶段三：级别 3 巨型补丁插件化**
+   - 隔离 `SaveSystem` 末尾的 600 行代码，封装为标准 Plugin 类，确保其注册流程清晰可见，不再是一坨无名的 IIFE 匿名函数。
+4. **阶段四：测试与验证**
+   - 开启本地 HTTP 服务 (`python3 -m http.server`)，利用 OpenPreview 验证游戏各项系统（渲染、声音、保存）是否稳定运行。
+
+---
+**此方案已通过严谨的变量作用域与时序验证，确保不会破坏游戏的任何现有功能。**
