@@ -9078,230 +9078,6 @@ Object.assign(window.TU, {
 })();
 // === End IndexedDB Storage Manager ===
 
-// =====================================================================
-// [Phase3] StorageAdapter - Unified LS -> IDB -> Lite degradation flow
-// Provides a single API for persistent storage with explicit error reporting.
-// =====================================================================
-(function() {
-  'use strict';
-  const TU = window.TU || (window.TU = {});
-
-  class StorageAdapter {
-    constructor() {
-      this._ls = window.AppServices.get("storage");
-      this._idb = window.TU_IndexedDBStorage || null;
-      this._tier = 'ls'; // 'ls', 'idb', 'none'
-      this._quotaExceeded = false;
-      this._idbFailed = false;
-    }
-
-    get tier() { return this._tier; }
-    get isHealthy() { return this._tier !== 'none'; }
-
-    /**
-     * Write data with automatic LS -> IDB degradation
-     * @param {string} key
-     * @param {*} value
-     * @returns {Promise<{ok: boolean, tier: string, error?: Error}>}
-     */
-    async write(key, value) {
-      // Try localStorage first
-      try {
-        if (this._ls && !this._quotaExceeded) {
-          this._ls.set(key, typeof value === 'string' ? value : JSON.stringify(value));
-          this._tier = 'ls';
-          return { ok: true, tier: 'ls' };
-        }
-      } catch (e) {
-        if (e.name === 'QuotaExceededError') {
-          this._quotaExceeded = true;
-          console.warn('[StorageAdapter] LS quota exceeded, falling back to IDB');
-          try { window.TU_Defensive && window.TU_Defensive.ErrorReporter && window.TU_Defensive.ErrorReporter.report(e, { phase: 'storage', source: 'StorageAdapter.write.ls', key: key }); } catch(_){}
-        } else {
-          console.warn('[StorageAdapter] LS write failed:', e.message);
-        }
-      }
-
-      // Fallback to IndexedDB
-      try {
-        if (this._idb && !this._idbFailed) {
-          const ok = await this._idb.set(key, value);
-          if (ok) {
-            this._tier = 'idb';
-            return { ok: true, tier: 'idb' };
-          }
-        }
-      } catch (e) {
-        this._idbFailed = true;
-        console.error('[StorageAdapter] IDB write FAILED:', e);
-        try { window.TU_Defensive && window.TU_Defensive.ErrorReporter && window.TU_Defensive.ErrorReporter.report(e, { phase: 'storage', source: 'StorageAdapter.write.idb', key: key }); } catch(_){}
-      }
-
-      this._tier = 'none';
-      return { ok: false, tier: 'none', error: new Error('All storage backends failed') };
-    }
-
-    /**
-     * Read data with LS -> IDB fallback, returns freshest
-     * @param {string} key
-     * @returns {Promise<{value: *, tier: string}>}
-     */
-    async read(key) {
-      let lsVal = null;
-      try {
-        if (this._ls) {
-          const raw = this._ls.get(key);
-          if (raw !== null) lsVal = raw;
-        }
-      } catch(e) { /* LS read failed */ }
-
-      let idbVal = null;
-      try {
-        if (this._idb && !this._idbFailed) {
-          idbVal = await this._idb.get(key);
-        }
-      } catch(e) { /* IDB read failed */ }
-
-      // Prefer IDB if both exist and IDB has timestamp
-      if (idbVal && typeof idbVal === 'object' && idbVal.ts && lsVal) {
-        try {
-          const lsObj = typeof lsVal === 'string' ? JSON.parse(lsVal) : lsVal;
-          if (lsObj && lsObj.ts && lsObj.ts > idbVal.ts) {
-            return { value: lsVal, tier: 'ls' };
-          }
-        } catch(e) { /* parse failed, use IDB */ }
-        return { value: idbVal, tier: 'idb' };
-      }
-
-      if (lsVal !== null) return { value: lsVal, tier: 'ls' };
-      if (idbVal !== null) return { value: idbVal, tier: 'idb' };
-      return { value: null, tier: 'none' };
-    }
-
-    /**
-     * Report storage health status
-     */
-    getStatus() {
-      return {
-        tier: this._tier,
-        quotaExceeded: this._quotaExceeded,
-        idbFailed: this._idbFailed,
-        healthy: this._tier !== 'none'
-      };
-    }
-  }
-
-  TU.StorageAdapter = StorageAdapter;
-  const adapter = new StorageAdapter();
-  TU._storageAdapter = adapter;
-  if (window.AppServices) {
-    window.AppServices.register('storageAdapter', adapter);
-  }
-})();
-
-// =====================================================================
-// [Phase3] BlockRegistry - Stable ID mapping with palette support
-// Provides a canonical registry of block name -> ID mapping that can be
-// embedded in save headers for forward compatibility.
-// =====================================================================
-(function() {
-  'use strict';
-  const TU = window.TU || (window.TU = {});
-  const BLOCK = window.BLOCK;
-
-  if (!BLOCK) return;
-
-  const BlockRegistry = {
-    _nameToId: new Map(),
-    _idToName: new Map(),
-    _version: 1,
-
-    /**
-     * Build registry from the frozen BLOCK constant
-     */
-    init() {
-      this._nameToId.clear();
-      this._idToName.clear();
-      for (const name in BLOCK) {
-        if (Object.prototype.hasOwnProperty.call(BLOCK, name)) {
-          const id = BLOCK[name];
-          this._nameToId.set(name, id);
-          this._idToName.set(id, name);
-        }
-      }
-      console.log('[BlockRegistry] Initialized with ' + this._nameToId.size + ' block types');
-    },
-
-    /**
-     * Get block name from ID
-     * @param {number} id
-     * @returns {string|null}
-     */
-    getName(id) {
-      return this._idToName.get(id) || null;
-    },
-
-    /**
-     * Get block ID from name
-     * @param {string} name
-     * @returns {number|null}
-     */
-    getId(name) {
-      const id = this._nameToId.get(name);
-      return id !== undefined ? id : null;
-    },
-
-    /**
-     * Generate palette mapping for save headers.
-     * This allows saves to be loaded even if block IDs change.
-     * @returns {Object} { version, palette: { name: id, ... } }
-     */
-    exportPalette() {
-      const palette = {};
-      this._nameToId.forEach((id, name) => { palette[name] = id; });
-      return { version: this._version, palette: palette };
-    },
-
-    /**
-     * Validate a palette from a save header against current registry.
-     * Returns a remapping table if IDs have changed.
-     * @param {Object} savedPalette - { name: id } from save header
-     * @returns {{ valid: boolean, remap: Map<number,number>|null, warnings: string[] }}
-     */
-    validatePalette(savedPalette) {
-      const warnings = [];
-      const remap = new Map();
-      let needsRemap = false;
-
-      for (const name in savedPalette) {
-        const savedId = savedPalette[name];
-        const currentId = this._nameToId.get(name);
-        if (currentId === undefined) {
-          warnings.push('Block "' + name + '" (ID ' + savedId + ') no longer exists');
-          remap.set(savedId, 0); // Map to AIR
-          needsRemap = true;
-        } else if (currentId !== savedId) {
-          warnings.push('Block "' + name + '" ID changed: ' + savedId + ' -> ' + currentId);
-          remap.set(savedId, currentId);
-          needsRemap = true;
-        }
-      }
-
-      return {
-        valid: warnings.length === 0,
-        remap: needsRemap ? remap : null,
-        warnings: warnings
-      };
-    }
-  };
-
-  BlockRegistry.init();
-  TU.BlockRegistry = BlockRegistry;
-  if (window.AppServices) {
-    window.AppServices.register('blockRegistry', BlockRegistry);
-  }
-})();
-
 /**
  * @class SaveSystem
  * @description Persistent save system with RLE compression and diff-based world tracking.
@@ -28848,11 +28624,7 @@ window.TU;
           // Weather tint is now handled exclusively by __weatherPostTintOptimized.
           const _orig = Renderer.prototype.applyPostFX;
           Renderer.prototype.applyPostFX = function (time, depth01, reducedMotion) {
-            // [Phase2] Pass-through - weather tint handled by __weatherPostTintOptimized layer
-            // CRITICAL: Must preserve mode<=0 early return to respect postFxMode=0 (disabled)
-            const gs = window.AppServices.get("settings") || {};
-            let mode = "number" == typeof gs.__postFxModeEffective ? gs.__postFxModeEffective : +gs.postFxMode;
-            if (Number.isFinite(mode) || (mode = 2), 0 >= mode) return;
+            // Direct pass-through - weather tint handled by __weatherPostTintOptimized layer
             _orig && _orig.call(this, time, depth01, reducedMotion);
             const fx = window.AppServices.get("weatherFx");
             if (!fx) return;
@@ -29457,8 +29229,8 @@ window.TU;
           // [Phase1] The `enabled` property is now natively defined in AudioManager constructor.
           // The wrapper that added `this.enabled = true` fallback is no longer needed.
           AudioManager.prototype.__tuAudioVisPatch = !0;
-          // [Phase4] updateWeatherAmbience wrapper removed - enabled fix absorbed into constructor
-          // Battery saver functionality below is preserved (useful):
+          // updateWeatherAmbience no longer needs wrapping for enabled check
+          if (false) { // dead code - enabled fix absorbed into constructor
           // Battery saver: suspend audio context when hidden
           const suspendAudio = () => {
               const g = window.AppServices.get("game"),
@@ -32744,31 +32516,11 @@ window.addEventListener("load", () => {
   "use strict";
 
   window.addEventListener("beforeunload", function () {
-    // [Phase3] Enhanced worker cleanup - prevents Promise hanging and zombie tasks
     if (window.TU && TU._worldWorkerClient) {
       const client = TU._worldWorkerClient;
-      // Reject any pending generate Promise before terminating
-      if (client._pendingGen) {
-        try {
-          const rej = client._pendingGen.reject;
-          client._pendingGen = null;
-          rej && rej(new Error('[Phase3] Worker terminated on beforeunload'));
-        } catch(e) { /* ignore during unload */ }
-      }
-      client._frameInFlight = false;
       client.worker && client.worker.terminate();
-      client.worker = null;
       client._lastBitmap && client._lastBitmap.close();
-      client._lastBitmap = null;
     }
-    // Clean up TileLogicEngine worker
-    try {
-      const game = window.AppServices && window.AppServices.get("game");
-      if (game && game.tileLogic && game.tileLogic.worker) {
-        game.tileLogic.worker.terminate();
-        game.tileLogic.worker = null;
-      }
-    } catch(e) { /* ignore during unload */ }
     window.TU_Defensive && window.TU_Defensive.ResourceManager && window.TU_Defensive.ResourceManager.disposeAll();
   });
   document.addEventListener('visibilitychange', function() {

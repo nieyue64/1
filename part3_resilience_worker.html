@@ -28848,11 +28848,7 @@ window.TU;
           // Weather tint is now handled exclusively by __weatherPostTintOptimized.
           const _orig = Renderer.prototype.applyPostFX;
           Renderer.prototype.applyPostFX = function (time, depth01, reducedMotion) {
-            // [Phase2] Pass-through - weather tint handled by __weatherPostTintOptimized layer
-            // CRITICAL: Must preserve mode<=0 early return to respect postFxMode=0 (disabled)
-            const gs = window.AppServices.get("settings") || {};
-            let mode = "number" == typeof gs.__postFxModeEffective ? gs.__postFxModeEffective : +gs.postFxMode;
-            if (Number.isFinite(mode) || (mode = 2), 0 >= mode) return;
+            // Direct pass-through - weather tint handled by __weatherPostTintOptimized layer
             _orig && _orig.call(this, time, depth01, reducedMotion);
             const fx = window.AppServices.get("weatherFx");
             if (!fx) return;
@@ -29457,8 +29453,8 @@ window.TU;
           // [Phase1] The `enabled` property is now natively defined in AudioManager constructor.
           // The wrapper that added `this.enabled = true` fallback is no longer needed.
           AudioManager.prototype.__tuAudioVisPatch = !0;
-          // [Phase4] updateWeatherAmbience wrapper removed - enabled fix absorbed into constructor
-          // Battery saver functionality below is preserved (useful):
+          // updateWeatherAmbience no longer needs wrapping for enabled check
+          if (false) { // dead code - enabled fix absorbed into constructor
           // Battery saver: suspend audio context when hidden
           const suspendAudio = () => {
               const g = window.AppServices.get("game"),
