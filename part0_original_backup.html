@@ -4987,64 +4987,17 @@ window.TU = window.TU || {};
       const entry = { tag: tag || "unknown", error: e, at: Date.now() };
       errors.push(entry);
       errors.length > maxErrors && errors.splice(0, errors.length - maxErrors);
-      // [Phase0] Always log errors explicitly - never silently swallow
       try {
         log(level, tag, e);
-      } catch(e2){console.error('[TU.Safe.run] logging failed', tag, e, e2);}
-      // [Phase0] Report to ErrorReporter for UI visibility
-      try {
-        if (window.TU_Defensive && window.TU_Defensive.ErrorReporter) {
-          window.TU_Defensive.ErrorReporter.report(e, { phase: "safe.run", source: tag });
-        }
-      } catch(e2){}
+      } catch(e){console.warn('[Catch]',e);}
       if (o.toastMessage) toast(o.toastMessage, o.toastMs, o.toastKey || tag, o.cooldownMs);
       if (o.rethrow) throw e;
       return o.fallback;
     }
   }
 
-  /**
-   * [Phase0] runAsync - Proper async error boundary that does NOT silently swallow Promise rejections
-   * Unlike run(), this handles async functions and surfaces errors to the console and ErrorReporter.
-   * @param {string} tag - Context tag for error reporting
-   * @param {Function} fn - Async function to execute
-   * @param {Object} [opts] - Options (same as run, plus: retries, retryDelayMs)
-   * @returns {Promise<*>} Result of fn() or opts.fallback on error
-   */
-  async function runAsync(tag, fn, opts) {
-    const o = opts || {};
-    const maxRetries = o.retries || 0;
-    let lastErr = null;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        return await fn();
-      } catch (e) {
-        lastErr = e;
-        if (attempt < maxRetries) {
-          await new Promise(r => setTimeout(r, o.retryDelayMs || 200));
-          continue;
-        }
-        const level = o.level || "error";
-        const entry = { tag: tag || "unknown", error: e, at: Date.now(), async: true };
-        errors.push(entry);
-        errors.length > maxErrors && errors.splice(0, errors.length - maxErrors);
-        try { log(level, "[async] " + tag, e); } catch(e2){ console.error('[TU.Safe.runAsync] logging failed', tag, e, e2); }
-        try {
-          if (window.TU_Defensive && window.TU_Defensive.ErrorReporter) {
-            window.TU_Defensive.ErrorReporter.report(e, { phase: "safe.runAsync", source: tag, attempt: attempt });
-          }
-        } catch(e2){}
-        if (o.toastMessage) toast(o.toastMessage, o.toastMs, o.toastKey || tag, o.cooldownMs);
-        if (o.rethrow) throw e;
-        return o.fallback;
-      }
-    }
-    return o.fallback;
-  }
-
   TU.Safe = {
     run,
-    runAsync,
     toast,
     shouldFire,
     errors
@@ -5174,29 +5127,18 @@ window.AppServices = new class ServiceLocator {
         try {
           return localStorage.getItem(k);
         } catch (e) {
-          // [Phase0] Surface storage read errors explicitly
-          console.warn('[Storage.get] failed for key "' + k + '":', e.name, e.message);
           return null;
         }
       },
       set: (k, v) => {
         try {
           localStorage.setItem(k, v);
-        } catch(e){
-          // [Phase0] Surface quota exceeded errors - these are CRITICAL, not ignorable
-          if (e.name === 'QuotaExceededError') {
-            console.error('[Storage.set] QUOTA EXCEEDED for key "' + k + '":', e);
-            try { window.TU_Defensive && window.TU_Defensive.ErrorReporter && window.TU_Defensive.ErrorReporter.report(e, { phase: 'storage', source: 'localStorage.set', key: k }); } catch(_){}
-            try { window.GameEvents && window.GameEvents.emit("ui:toast", "⚠️ 存储空间不足，请清理浏览器数据", 3000); } catch(_){}
-          } else {
-            console.warn('[Storage.set] failed for key "' + k + '":', e.name, e.message);
-          }
-        }
+        } catch(e){console.warn('[Catch]',e);}
       },
       remove: k => {
         try {
           window.localStorage.removeItem(k);
-        } catch(e){console.warn('[Storage.remove] failed for key "' + k + '":', e.name, e.message);}
+        } catch(e){console.warn('[Catch]',e);}
       }
     });
     this.register("session", {
@@ -5693,199 +5635,6 @@ const TU_PERF = "undefined" != typeof performance && performance && "function" =
       ErrorReporter.report(error, context);
     }
   };
-
-  // =====================================================================
-  // [Phase0] GlobalErrorBoundary - Explicit error surfacing for all subsystems
-  // Replaces silent error swallowing with visible, debuggable error reporting.
-  // =====================================================================
-  const GlobalErrorBoundary = {
-    /**
-     * Wrap a synchronous function with explicit error reporting.
-     * Unlike TU.Safe.run, this ALWAYS logs to console.error (never silent).
-     * @param {string} subsystem - e.g. "Worker", "IDB", "AudioManager"
-     * @param {Function} fn
-     * @param {Object} [opts] - { fallback, rethrow, toast }
-     */
-    guard(subsystem, fn, opts) {
-      try {
-        return fn();
-      } catch (e) {
-        const o = opts || {};
-        console.error("[GlobalErrorBoundary:" + subsystem + "]", e);
-        ErrorReporter.report(e, { phase: "guard", source: subsystem });
-        if (o.toast) {
-          try { global.GameEvents && global.GameEvents.emit("ui:toast", "[" + subsystem + "] " + (e.message || e), 3000); } catch(_){}
-        }
-        if (o.rethrow) throw e;
-        return o.fallback;
-      }
-    },
-    /**
-     * Wrap an async function with explicit error reporting.
-     * Catches both sync throws and Promise rejections.
-     * @param {string} subsystem
-     * @param {Function} asyncFn
-     * @param {Object} [opts] - { fallback, rethrow, toast, retries, retryDelayMs }
-     */
-    async guardAsync(subsystem, asyncFn, opts) {
-      const o = opts || {};
-      const maxRetries = o.retries || 0;
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          return await asyncFn();
-        } catch (e) {
-          if (attempt < maxRetries) {
-            console.warn("[GlobalErrorBoundary:" + subsystem + "] retry " + (attempt + 1) + "/" + maxRetries, e.message);
-            await new Promise(r => setTimeout(r, o.retryDelayMs || 300));
-            continue;
-          }
-          console.error("[GlobalErrorBoundary:" + subsystem + "] FAILED after " + (attempt + 1) + " attempts", e);
-          ErrorReporter.report(e, { phase: "guardAsync", source: subsystem, attempts: attempt + 1 });
-          if (o.toast) {
-            try { global.GameEvents && global.GameEvents.emit("ui:toast", "[" + subsystem + "] " + (e.message || e), 3000); } catch(_){}
-          }
-          if (o.rethrow) throw e;
-          return o.fallback;
-        }
-      }
-    }
-  };
-  global.TU.GlobalErrorBoundary = GlobalErrorBoundary;
-  global.TU_Defensive.GlobalErrorBoundary = GlobalErrorBoundary;
-
-  // =====================================================================
-  // [Phase0] PerformanceBaseline - Frame/Tick time p95/p99 tracking
-  // Collects performance metrics to establish baselines before refactoring.
-  // =====================================================================
-  const PerformanceBaseline = {
-    _frameTimes: new Float64Array(512),
-    _tickTimes: new Float64Array(512),
-    _frameIdx: 0,
-    _tickIdx: 0,
-    _frameCount: 0,
-    _tickCount: 0,
-    _startTime: 0,
-    _enabled: false,
-    start() {
-      this._startTime = performance.now();
-      this._enabled = true;
-      this._frameCount = 0;
-      this._tickCount = 0;
-    },
-    recordFrame(ms) {
-      if (!this._enabled) return;
-      this._frameTimes[this._frameIdx & 511] = ms;
-      this._frameIdx++;
-      this._frameCount++;
-    },
-    recordTick(ms) {
-      if (!this._enabled) return;
-      this._tickTimes[this._tickIdx & 511] = ms;
-      this._tickIdx++;
-      this._tickCount++;
-    },
-    _percentile(arr, count, p) {
-      const n = Math.min(count, 512);
-      if (n === 0) return 0;
-      const sorted = Array.from(arr.subarray(0, n)).sort((a, b) => a - b);
-      const idx = Math.min(n - 1, Math.floor(n * p));
-      return sorted[idx];
-    },
-    getReport() {
-      const fc = Math.min(this._frameCount, 512);
-      const tc = Math.min(this._tickCount, 512);
-      return {
-        elapsed: performance.now() - this._startTime,
-        frames: this._frameCount,
-        ticks: this._tickCount,
-        frame_p50: this._percentile(this._frameTimes, fc, 0.50),
-        frame_p95: this._percentile(this._frameTimes, fc, 0.95),
-        frame_p99: this._percentile(this._frameTimes, fc, 0.99),
-        tick_p50: this._percentile(this._tickTimes, tc, 0.50),
-        tick_p95: this._percentile(this._tickTimes, tc, 0.95),
-        tick_p99: this._percentile(this._tickTimes, tc, 0.99)
-      };
-    },
-    printReport() {
-      const r = this.getReport();
-      console.log(
-        "[PerformanceBaseline] " + (r.elapsed / 1000).toFixed(1) + "s, " +
-        r.frames + " frames, " + r.ticks + " ticks\n" +
-        "  Frame: p50=" + r.frame_p50.toFixed(2) + "ms, p95=" + r.frame_p95.toFixed(2) + "ms, p99=" + r.frame_p99.toFixed(2) + "ms\n" +
-        "  Tick:  p50=" + r.tick_p50.toFixed(2) + "ms, p95=" + r.tick_p95.toFixed(2) + "ms, p99=" + r.tick_p99.toFixed(2) + "ms"
-      );
-      return r;
-    }
-  };
-  global.TU.PerformanceBaseline = PerformanceBaseline;
-  global.TU_Defensive.PerformanceBaseline = PerformanceBaseline;
-
-  // =====================================================================
-  // [Phase0] Patch Audit Ledger - Catalogs all monkey patches for tracking
-  // =====================================================================
-  const PatchAuditLedger = {
-    _entries: [],
-    register(entry) {
-      // entry: { id, target, method, type: 'wrap'|'replace'|'extend', phase, status }
-      this._entries.push(Object.assign({ at: Date.now() }, entry));
-    },
-    getAll() { return this._entries.slice(); },
-    getByTarget(target) { return this._entries.filter(e => e.target === target); },
-    printSummary() {
-      const grouped = {};
-      this._entries.forEach(e => {
-        const k = e.target + "." + (e.method || "*");
-        (grouped[k] || (grouped[k] = [])).push(e);
-      });
-      console.group("[PatchAuditLedger] " + this._entries.length + " patches registered");
-      Object.keys(grouped).sort().forEach(k => {
-        console.log("  " + k + " (" + grouped[k].length + "x): " + grouped[k].map(e => e.id).join(", "));
-      });
-      console.groupEnd();
-    }
-  };
-  global.TU.PatchAuditLedger = PatchAuditLedger;
-
-  // [Phase0] Auto-hook PerformanceBaseline into game lifecycle via GameEvents
-  // This starts collecting metrics as soon as the game RAF loop begins
-  // and prints a report after 30 seconds of gameplay.
-  if (global.GameEvents && global.GameEvents.on) {
-    global.GameEvents.on('game:raf:start', function __perfBaselineHook() {
-      if (PerformanceBaseline._enabled) return;
-      PerformanceBaseline.start();
-      console.log("[Phase0] PerformanceBaseline started - collecting frame/tick metrics...");
-      // Auto-print report after 30s
-      setTimeout(function() {
-        if (PerformanceBaseline._frameCount > 100) {
-          console.log("[Phase0] === PERFORMANCE BASELINE REPORT (30s) ===");
-          PerformanceBaseline.printReport();
-        }
-      }, 30000);
-    });
-    // Hook into game:update to measure tick times
-    let __perfTickStart = 0;
-    global.GameEvents.on('game:update:pre', function() {
-      __perfTickStart = performance.now();
-    });
-    global.GameEvents.on('game:update:post', function() {
-      if (__perfTickStart > 0) {
-        PerformanceBaseline.recordTick(performance.now() - __perfTickStart);
-        __perfTickStart = 0;
-      }
-    });
-    // Hook into game:render to measure frame times
-    let __perfFrameStart = 0;
-    global.GameEvents.on('game:render:pre', function() {
-      __perfFrameStart = performance.now();
-    });
-    global.GameEvents.on('game:render:post', function() {
-      if (__perfFrameStart > 0) {
-        PerformanceBaseline.recordFrame(performance.now() - __perfFrameStart);
-        __perfFrameStart = 0;
-      }
-    });
-  }
-
   /**
    * @description Debug mode flag - enables verbose logging and deprecation warnings
    */
@@ -8973,9 +8722,7 @@ Object.assign(window.TU, {
           request.onerror = () => reject(request.error);
         });
       } catch (e) {
-        // [Phase0] Explicitly report IDB failures - these indicate potential save data loss
-        console.error('[IndexedDBStorage] get FAILED for key "' + key + '":', e);
-        try { window.TU_Defensive && window.TU_Defensive.ErrorReporter && window.TU_Defensive.ErrorReporter.report(e, { phase: 'idb', source: 'IndexedDBStorage.get', key: key }); } catch(_){}
+        console.warn('[IndexedDBStorage] get failed:', e);
         return null;
       }
     }
@@ -8992,10 +8739,7 @@ Object.assign(window.TU, {
           request.onerror = () => reject(request.error);
         });
       } catch (e) {
-        // [Phase0] IDB write failures are CRITICAL - may cause zombie saves
-        console.error('[IndexedDBStorage] set FAILED for key "' + key + '":', e);
-        try { window.TU_Defensive && window.TU_Defensive.ErrorReporter && window.TU_Defensive.ErrorReporter.report(e, { phase: 'idb', source: 'IndexedDBStorage.set', key: key }); } catch(_){}
-        try { window.GameEvents && window.GameEvents.emit("ui:toast", "⚠️ IDB存储失败：" + (e.message || e), 3000); } catch(_){}
+        console.warn('[IndexedDBStorage] set failed:', e);
         return false;
       }
     }
@@ -29139,16 +28883,16 @@ window.TU;
           Game = TU.Game,
           InputManager = TU.InputManager,
           AudioManager = TU.AudioManager;
-        // [Phase0] REMOVED: duplicate game:init:post emission.
-        // Game.prototype.init (original class) already emits 'game:init:post' at end of init().
-        // This patch was causing DOUBLE firing of game:init:post, leading to:
-        //   - Double initialization of TileLogicEngine
-        //   - Double machine indexing
-        //   - First-frame stutter spike
-        // The __tuGameReadyEvent flag is preserved so dependent code doesn't break.
         if (Game && Game.prototype && !Game.prototype.__tuGameReadyEvent) {
           Game.prototype.__tuGameReadyEvent = !0;
-          // No wrapper needed - original Game.init already emits game:init:post
+          const _init = Game.prototype.init;
+          "function" == typeof _init && (Game.prototype.init = async function (...args) {
+            const r = await _init.apply(this, args);
+            try {
+              window.GameEvents.emit("game:init:post", this);
+            } catch(e){console.warn('[Catch]',e);}
+            return r;
+          });
         }
         if (InputManager && InputManager.prototype && !InputManager.prototype.__tuInputSafety) {
           InputManager.prototype.__tuInputSafety = !0;
